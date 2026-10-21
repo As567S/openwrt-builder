@@ -1,0 +1,168 @@
+name: Build OpenWrt (x86_64)
+
+# 触发方式：
+# 1) 每天定时检查 OpenWrt 官方最新 stable 版本，没编过才编（官方一发新版就出包）
+# 2) 手动触发：可指定版本 tag（如 v24.10.4），留空 = 最新 stable；force=true 可重编已发布过的版本
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'OpenWrt 版本 tag（留空 = 最新 stable）'
+        required: false
+        default: ''
+      force:
+        description: '强制编译（即使该版本已发布过）'
+        type: boolean
+        default: false
+  schedule:
+    - cron: '17 3 * * *'
+
+permissions:
+  contents: write
+
+jobs:
+  check:
+    runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+      should_build: ${{ steps.ver.outputs.should_build }}
+    steps:
+      - name: Determine target version
+        id: ver
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_FORCE: ${{ inputs.force }}
+        run: |
+          if [ -n "$INPUT_VERSION" ]; then
+            VER="$INPUT_VERSION"
+          else
+            VER=$(git ls-remote --tags https://github.com/openwrt/openwrt.git 'refs/tags/v*' \
+              | awk '{print $2}' | sed 's#refs/tags/##' \
+              | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+              | sort -V | tail -1)
+          fi
+          if [ -z "$VER" ]; then
+            echo "Failed to determine version" >&2
+            exit 1
+          fi
+          echo "Target OpenWrt version: $VER"
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          if [ "$INPUT_FORCE" = "true" ]; then
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+          elif gh release view "$VER" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $VER already exists in this repo, skip build."
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: check
+    if: needs.check.outputs.should_build == 'true'
+    runs-on: ubuntu-22.04
+    env:
+      OPENWRT_VERSION: ${{ needs.check.outputs.version }}
+    steps:
+      - name: Checkout builder repo
+        uses: actions/checkout@v4
+        with:
+          path: builder
+
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang flex bison g++ gawk \
+            gcc-multilib g++-multilib gettext git libncurses5-dev libssl-dev \
+            python3 python3-setuptools python3-pip rsync swig unzip \
+            zlib1g-dev file wget xsltproc subversion libelf-dev
+
+      # luci-app-geph5 在编译时会从 crates.io 拉 geph5-client 的 Rust 源码现场交叉编译
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - name: Verify Rust
+        run: |
+          cargo --version
+          rustc --version
+          rustup target list --installed
+
+      - name: Clone OpenWrt source
+        run: |
+          git clone --depth 1 --branch "$OPENWRT_VERSION" \
+            https://github.com/openwrt/openwrt.git openwrt
+
+      - name: Update and install feeds
+        working-directory: openwrt
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Add custom packages
+        working-directory: openwrt
+        run: |
+          while IFS= read -r line; do
+            case "$line" in ''|\#*) continue ;; esac
+            url="${line%% *}"
+            name=$(basename "$url" .git)
+            echo "== custom package: $url -> package/$name"
+            git clone --depth 1 "$url" "package/$name"
+          done < ../builder/custom-packages.txt
+          ls package
+
+      - name: Configure
+        working-directory: openwrt
+        run: |
+          cp ../builder/.config .config
+          echo "== extra config lines:"
+          cat ../builder/extra-config.txt
+          grep -v '^\s*#' ../builder/extra-config.txt | grep -v '^\s*$' >> .config || true
+          make defconfig
+          grep -E 'CONFIG_PACKAGE_luci-app-geph5=y' .config \
+            && echo "luci-app-geph5 enabled OK" \
+            || { echo "ERROR: luci-app-geph5 not enabled after defconfig" >&2; exit 1; }
+
+      - name: Download sources
+        working-directory: openwrt
+        run: make download -j8
+
+      - name: Compile firmware
+        working-directory: openwrt
+        run: |
+          echo "Building with $(nproc) threads"
+          make -j$(nproc) || make -j1 V=s
+
+      - name: Collect firmware files
+        working-directory: openwrt
+        run: |
+          mkdir -p ../release-files
+          cp bin/targets/x86/64/*.img.gz ../release-files/ 2>/dev/null || true
+          cp bin/targets/x86/64/*.manifest ../release-files/ 2>/dev/null || true
+          cp bin/targets/x86/64/sha256sums ../release-files/ 2>/dev/null || true
+          cp .config ../release-files/firmware.config
+          tar -czf ../release-files/packages-x86_64.tar.gz -C bin/targets/x86/64 packages
+          ls -la ../release-files
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.OPENWRT_VERSION }}
+          name: OpenWrt ${{ env.OPENWRT_VERSION }} x86_64 (custom)
+          body: |
+            基于 OpenWrt 官方 ${{ env.OPENWRT_VERSION }} 源码自动编译（x86_64 generic）。
+            - 软件包清单见附件 firmware.config
+            -含自定义包：luci-app-geph5（编译时从 crates.io 拉取 geph5-client Rust 源码交叉编译）
+            - packages-x86_64.tar.gz 为本次构建的全部 ipk 包合集
+          files: release-files/*

@@ -1,0 +1,5 @@
+# 额外强制启用的配置行：构建时会追加到 .config 末尾再执行 make defconfig。
+# 自定义包因为不在官方源码树里，.config 里勾不上，必须在这里启用。
+# 以 # 开头的行会被忽略。
+
+CONFIG_PACKAGE_luci-app-geph5=y

@@ -1,0 +1,5 @@
+# 自定义包清单：一行一个 Git 仓库地址。
+# 构建时会把每个仓库克隆到 OpenWrt 源码的 package/<仓库名> 下一起编译。
+# 以 # 开头的行和空行会被忽略。以后要加新包，在这里加一行即可（同时去 extra-config.txt 里启用它）。
+
+https://github.com/program-thinked/luci-app-geph5.git

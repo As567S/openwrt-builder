@@ -149,6 +149,7 @@ jobs:
         run: |
           mkdir -p ../release-files
           cp bin/targets/x86/64/*.img.gz ../release-files/ 2>/dev/null || true
+          cp bin/targets/x86/64/*.img ../release-files/ 2>/dev/null || true
           cp bin/targets/x86/64/*.manifest ../release-files/ 2>/dev/null || true
           cp bin/targets/x86/64/sha256sums ../release-files/ 2>/dev/null || true
           cp .config ../release-files/firmware.config

@@ -134,6 +134,45 @@ jobs:
             && echo "luci-app-geph5 enabled OK" \
             || { echo "ERROR: luci-app-geph5 not enabled after defconfig" >&2; exit 1; }
 
+      # ----------------- 注入官方最新 Release 版 Xray-core -----------------
+      - name: Download and Inject Official Latest Xray-core
+        working-directory: openwrt
+        run: |
+          echo "==> 1. 获取 XTLS/Xray-core 最新 Release 下载地址..."
+          XRAY_URL=$(curl -sSL https://api.github.com/repos/XTLS/Xray-core/releases/latest | grep "browser_download_url.*Xray-linux-64.zip" | head -n 1 | cut -d '"' -f 4)
+          
+          if [ -z "$XRAY_URL" ]; then
+            echo "ERROR: 无法获取 Xray 下载链接，请检查网络或 GitHub API 限制" >&2
+            exit 1
+          fi
+          echo "下载地址: $XRAY_URL"
+
+          echo "==> 2. 下载并解压 Release 包..."
+          mkdir -p /tmp/xray-bin
+          curl -sSL -o /tmp/xray-bin/xray.zip "$XRAY_URL"
+          unzip -q /tmp/xray-bin/xray.zip -d /tmp/xray-bin/
+
+          echo "==> 3. 部署到 OpenWrt 源码 files/ 根文件系统映射目录..."
+          mkdir -p files/usr/bin
+          mkdir -p files/usr/share/xray
+
+          # 安装核心程序，并赋予执行权限 (755)
+          cp -f /tmp/xray-bin/xray files/usr/bin/xray
+          chmod 755 files/usr/bin/xray
+
+          # 安装路由规则数据文件 (644)
+          cp -f /tmp/xray-bin/geoip.dat files/usr/share/xray/geoip.dat
+          cp -f /tmp/xray-bin/geosite.dat files/usr/share/xray/geosite.dat
+          chmod 644 files/usr/share/xray/geo*.dat
+
+          echo "==> 4. 清理临时下载目录..."
+          rm -rf /tmp/xray-bin
+
+          echo "==> 5. 校验注入结果..."
+          ls -la files/usr/bin/xray
+          ls -la files/usr/share/xray/
+      # -------------------------------------------------------------------
+
       - name: Download sources
         working-directory: openwrt
         run: make download -j8
@@ -164,6 +203,7 @@ jobs:
           body: |
             基于 OpenWrt 官方 ${{ env.OPENWRT_VERSION }} 源码自动编译（x86_64 generic）。
             - 软件包清单见附件 firmware.config
-            -含自定义包：luci-app-geph5（编译时从 crates.io 拉取 geph5-client Rust 源码交叉编译）
-            - packages-x86_64.tar.gz 为本次构建的全部 ipk 包合集
+            - 含自定义包：luci-app-geph5（编译时从 crates.io 拉取 geph5-client Rust 源码交叉编译）
+            - 预置注入：GitHub 官方最新 Release 版 Xray-core 及 Geo 数据文件
+            - packages-x86_64.tar.gz 为本次构建的全部包合集
           files: release-files/*
